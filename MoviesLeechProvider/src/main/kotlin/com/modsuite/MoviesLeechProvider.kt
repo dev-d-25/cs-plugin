@@ -62,18 +62,23 @@ class MoviesLeechProvider : MainAPI() {
     // Expand them server-side so each Episode points at its own link
     // instead of the hub page.
     private suspend fun expandArchive(archiveUrl: String): List<Pair<String, String>> {
-        return try {
-            val doc = app.get(archiveUrl).document
-            doc.select("a[href]").mapNotNull {
-                val href = fixUrl(it.attr("href"))
-                val label = it.text().trim()
-                if (label.isNotBlank() && episodeLabel.containsMatchIn(label)) {
-                    label to href
-                } else null
-            }.distinctBy { it.second }
-        } catch (e: Exception) {
-            emptyList()
+        // Archive hubs are flaky: they sometimes render empty (JS gate).
+        // Retry and keep the first non-empty result.
+        repeat(3) {
+            try {
+                val doc = app.get(archiveUrl, referer = mainUrl).document
+                val out = doc.select("a[href]").mapNotNull {
+                    val href = fixUrl(it.attr("href"))
+                    val label = it.text().trim()
+                    if (label.isNotBlank() && episodeLabel.containsMatchIn(label)) {
+                        label to href
+                    } else null
+                }.distinctBy { it.second }
+                if (out.isNotEmpty()) return out
+            } catch (e: Exception) {
+            }
         }
+        return emptyList()
     }
 
     override suspend fun load(url: String): LoadResponse {        val doc = app.get(url).document
@@ -85,37 +90,58 @@ class MoviesLeechProvider : MainAPI() {
         val year = Regex("""\((19|20)\d{2}\)""").find(title)?.value
             ?.removeSurrounding("(", ")")?.toIntOrNull()
 
+        // Streaming only: zip/batch packs and promo links are useless in
+        // the app, drop them before they ever become episodes.
         val rawLinks = doc.select("div.entry-content a[href], div.thecontent a[href]").map {
             it.text().trim() to fixUrl(it.attr("href"))
-        }.filter { (_, href) ->
+        }.filter { (label, href) ->
+            if (label.contains("batch", ignoreCase = true) ||
+                label.contains("zip", ignoreCase = true) ||
+                href.contains("modlist")
+            ) return@filter false
             href.contains("archive") || href.contains("hubcloud") ||
                 href.contains("filepress") || href.contains("vcloud") ||
-                href.contains("gdflix") || href.contains("modlist") ||
-                href.contains("leech")
+                href.contains("gdflix") || href.contains("leech")
         }
+        // Qualities appear in title order: "480p [500MB] || 720p [1.4GB]".
+        val qualities = Regex("""(480p|720p|1080p|2160p|4K)""", RegexOption.IGNORE_CASE)
+            .findAll(title).map { it.value.lowercase().replace("4k", "2160p") }.toList()
 
         val isSeries = title.contains("season", ignoreCase = true) ||
             title.contains("episode", ignoreCase = true)
 
         return if (isSeries) {
-            // Expand each archive hub into its episode list so the app
-            // shows Episode 1..N instead of one "G-Drive" row per quality.
+            // Per-episode entries. Each episode carries every quality as
+            // "quality|url" chunks joined by "|||", so tapping Episode 1
+            // offers 480p / 720p / 1080p mirrors like the reference apps.
             val episodes = mutableListOf<Episode>()
             if (rawLinks.isEmpty()) {
                 episodes.add(newEpisode(url) { name = "Watch" })
             } else {
-                for ((label, href) in rawLinks) {
+                val perQuality = rawLinks.mapIndexed { qi, (_, href) ->
+                    val quality = qualities.getOrNull(qi) ?: "HD"
                     if (href.contains("leechpro.blog/archives") && !href.contains("#")) {
-                        val subs = expandArchive(href)
-                        if (subs.isEmpty()) {
-                            episodes.add(newEpisode(href) { name = label.ifBlank { "Part" } })
-                        } else {
-                            subs.forEach { (epLabel, epHref) ->
-                                episodes.add(newEpisode(epHref) { name = "$label $epLabel".trim() })
-                            }
-                        }
+                        quality to expandArchive(href)
                     } else {
-                        episodes.add(newEpisode(href) { name = label.ifBlank { "Part ${episodes.size + 1}" } })
+                        quality to listOf("Watch" to href)
+                    }
+                }.filter { it.second.isNotEmpty() }
+                val count = perQuality.maxOfOrNull { it.second.size } ?: 0
+                if (count == 0) {
+                    perQuality.forEach { (quality, subs) ->
+                        subs.forEach { (_, href) ->
+                            episodes.add(newEpisode(href) { name = quality })
+                        }
+                    }
+                } else {
+                    for (i in 0 until count) {
+                        val chunks = perQuality.mapNotNull { (quality, subs) ->
+                            subs.getOrNull(i)?.let { (_, href) -> "$quality|$href" }
+                        }
+                        if (chunks.isEmpty()) continue
+                        episodes.add(newEpisode(chunks.joinToString("|||")) {
+                            name = "Episode ${i + 1}"
+                        })
                     }
                 }
             }
@@ -323,12 +349,65 @@ class MoviesLeechProvider : MainAPI() {
         }
     }
 
+    // One target in, one verdict out. Shared by the multi-source branch
+    // ("quality|url|||quality|url") and the normal archive scan below.
+    private suspend fun resolveTarget(
+        target: String,
+        referer: String,
+        tag: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            when {
+                target.contains("cloud.unblockedgames.world") -> {
+                    val dest = bypassCloudLink(target)
+                    if (dest == null) {
+                        loadExtractor(target, referer, subtitleCallback, callback)
+                    } else if (dest.contains("driveseed.org/file")) {
+                        resolveDriveSeed(dest, subtitleCallback, callback, tag)
+                    } else if (dest.contains("driveseed.org/r")) {
+                        resolveShortLink(dest, subtitleCallback, callback, tag)
+                    } else {
+                        loadExtractor(dest, referer, subtitleCallback, callback)
+                    }
+                }
+                target.contains("driveseed.org/file") ->
+                    resolveDriveSeed(target, subtitleCallback, callback, tag)
+                target.contains("video-seed.dev") || target.contains("video-gen.xyz") ||
+                    (target.contains("googleusercontent.com")) ->
+                    resolveSeedPage(target, "720p", subtitleCallback, callback, tag)
+                else -> loadExtractor(target, referer, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // Multi-source episode data: "480p|url|||720p|url|||1080p|url".
+        // Each chunk resolves to its own mirror entry.
+        if (data.contains("|||")) {
+            var found = false
+            for (entry in data.split("|||")) {
+                val tag = entry.substringBefore("|", "").trim()
+                val url = entry.substringAfter("|", "").trim()
+                if (url.isBlank()) continue
+                try {
+                    if (resolveTarget(url, mainUrl, tag, subtitleCallback, callback)) {
+                        found = true
+                    }
+                } catch (e: Exception) {
+                    continue
+                }
+            }
+            return found
+        }
         // Direct DriveSeed / seed links skip straight to the resolver.
         // Seed hosts rotate (video-seed.dev, cdn.video-gen.xyz, ...) so
         // match broadly here and let resolveSeedPage sort it out.
@@ -376,27 +455,9 @@ class MoviesLeechProvider : MainAPI() {
             // Skip junk anchors (comment-section links share the gate host).
             if (tag.contains("comment", ignoreCase = true)) continue
             try {
-                val ok = when {
-                    target.contains("cloud.unblockedgames.world") -> {
-                        val dest = bypassCloudLink(target)
-                        if (dest == null) {
-                            loadExtractor(target, data, subtitleCallback, callback)
-                        } else if (dest.contains("driveseed.org/file")) {
-                            resolveDriveSeed(dest, subtitleCallback, callback, tag)
-                        } else if (dest.contains("driveseed.org/r")) {
-                            resolveShortLink(dest, subtitleCallback, callback, tag)
-                        } else {
-                            loadExtractor(dest, data, subtitleCallback, callback)
-                        }
-                    }
-                    target.contains("driveseed.org/file") ->
-                        resolveDriveSeed(target, subtitleCallback, callback, tag)
-                    target.contains("video-seed.dev") || target.contains("video-gen.xyz") ||
-                        (target.contains("googleusercontent.com")) ->
-                        resolveSeedPage(target, "720p", subtitleCallback, callback, tag)
-                    else -> loadExtractor(target, data, subtitleCallback, callback)
+                if (resolveTarget(target, data, tag, subtitleCallback, callback)) {
+                    found = true
                 }
-                if (ok) found = true
             } catch (e: Exception) {
                 continue
             }

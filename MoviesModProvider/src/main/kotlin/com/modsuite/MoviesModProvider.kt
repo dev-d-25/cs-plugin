@@ -63,26 +63,65 @@ class MoviesModProvider : MainAPI() {
         val year = Regex("""\((19|20)\d{2}\)""").find(title)?.value
             ?.removeSurrounding("(", ")")?.toIntOrNull()
 
+        // Streaming only: zip/batch packs and promo links never play.
         val rawLinks = doc.select("div.entry-content a[href], div.thecontent a[href]").map {
             it.text().trim() to fixUrl(it.attr("href"))
-        }.filter { (_, href) ->
+        }.filter { (label, href) ->
+            if (label.contains("batch", ignoreCase = true) ||
+                label.contains("zip", ignoreCase = true) ||
+                href.contains("modlist") || href.contains("mmodlist")
+            ) return@filter false
             href.contains("archive") || href.contains("hubcloud") ||
                 href.contains("filepress") || href.contains("vcloud") ||
                 href.contains("gdflix") || href.contains("modpro")
         }
+        // Qualities appear in title order: "480p [400MB] || 720p [800MB]".
+        val qualities = Regex("""(480p|720p|1080p|2160p|4K)""", RegexOption.IGNORE_CASE)
+            .findAll(title).map { it.value.lowercase().replace("4k", "2160p") }.toList()
 
         val isSeries = title.contains("season", ignoreCase = true) ||
             title.contains("episode", ignoreCase = true) ||
             title.contains("web series", ignoreCase = true)
 
         return if (isSeries) {
-            val episodes = if (rawLinks.isEmpty()) {
-                listOf(newEpisode(url) { name = "Watch" })
+            // Per-episode entries, each carrying every quality as
+            // "quality server|url" chunks joined by "|||".
+            val episodes = mutableListOf<Episode>()
+            if (rawLinks.isEmpty()) {
+                episodes.add(newEpisode(url) { name = "Watch" })
             } else {
-                rawLinks.mapIndexed { i, (label, href) ->
-                    newEpisode(href) { name = label.ifBlank { "Part ${i + 1}" } }
+                val perQuality = rawLinks.mapIndexed { qi, (label, href) ->
+                    val server = label.replace(Regex("""[✅🚀⚡⬇️📂✔️]+"""), "").trim()
+                    val quality = qualities.getOrNull(qi) ?: "HD"
+                    val tag = "$quality $server".trim()
+                    if ((href.contains("links.modpro.blog/archives") ||
+                            href.contains("leechpro.blog/archives")) && !href.contains("#")
+                    ) {
+                        tag to expandArchive(href)
+                    } else {
+                        tag to listOf("Watch" to href)
+                    }
+                }.filter { it.second.isNotEmpty() }
+                val count = perQuality.maxOfOrNull { it.second.size } ?: 0
+                if (count == 0) {
+                    perQuality.forEach { (tag, subs) ->
+                        subs.forEach { (_, href) ->
+                            episodes.add(newEpisode("$tag|$href") { name = tag })
+                        }
+                    }
+                } else {
+                    for (i in 0 until count) {
+                        val chunks = perQuality.mapNotNull { (tag, subs) ->
+                            subs.getOrNull(i)?.let { (_, href) -> "$tag|$href" }
+                        }
+                        if (chunks.isEmpty()) continue
+                        episodes.add(newEpisode(chunks.joinToString("|||")) {
+                            name = "Episode ${i + 1}"
+                        })
+                    }
                 }
             }
+            if (episodes.isEmpty()) episodes.add(newEpisode(url) { name = "Watch" })
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.plot = plot
@@ -96,6 +135,30 @@ class MoviesModProvider : MainAPI() {
                 this.year = year
             }
         }
+    }
+
+    private val episodeLabel = Regex("""episode\s*\d+""", RegexOption.IGNORE_CASE)
+
+    // Archive hubs list their episodes as labeled sid links. Returns
+    // (label, url) pairs, empty when the archive holds direct sources.
+    private suspend fun expandArchive(archiveUrl: String): List<Pair<String, String>> {
+        // Archive hubs are flaky: they sometimes render empty (JS gate).
+        // Retry and keep the first non-empty result.
+        repeat(3) {
+            try {
+                val doc = app.get(archiveUrl, referer = mainUrl).document
+                val out = doc.select("a[href]").mapNotNull {
+                    val href = fixUrl(it.attr("href"))
+                    val label = it.text().trim()
+                    if (label.isNotBlank() && episodeLabel.containsMatchIn(label)) {
+                        label to href
+                    } else null
+                }.distinctBy { it.second }
+                if (out.isNotEmpty()) return out
+            } catch (e: Exception) {
+            }
+        }
+        return emptyList()
     }
 
     // Same middle as MoviesLeech (browser-verified): links.modpro.blog
@@ -276,12 +339,64 @@ class MoviesModProvider : MainAPI() {
         }
     }
 
+    // One target in, one verdict out. Shared by the multi-source branch
+    // ("quality|url|||quality|url") and the normal archive scan below.
+    private suspend fun resolveTarget(
+        target: String,
+        referer: String,
+        tag: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            when {
+                target.contains("cloud.unblockedgames.world") -> {
+                    val dest = bypassCloudLink(target)
+                    if (dest == null) {
+                        loadExtractor(target, referer, subtitleCallback, callback)
+                    } else if (dest.contains("driveseed.org/file")) {
+                        resolveDriveSeed(dest, subtitleCallback, callback, tag)
+                    } else if (dest.contains("driveseed.org/r")) {
+                        resolveShortLink(dest, subtitleCallback, callback, tag)
+                    } else {
+                        loadExtractor(dest, referer, subtitleCallback, callback)
+                    }
+                }
+                target.contains("driveseed.org/file") ->
+                    resolveDriveSeed(target, subtitleCallback, callback, tag)
+                target.contains("video-seed.dev") || target.contains("video-gen.xyz") ||
+                    (target.contains("googleusercontent.com")) ->
+                    resolveSeedPage(target, "720p", subtitleCallback, callback, tag)
+                else -> loadExtractor(target, referer, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // Multi-source episode data: "1080p Fast Server|url|||720p|url".
+        if (data.contains("|||")) {
+            var multiFound = false
+            for (entry in data.split("|||")) {
+                val tag = entry.substringBefore("|", "").trim()
+                val url = entry.substringAfter("|", "").trim()
+                if (url.isBlank()) continue
+                try {
+                    if (resolveTarget(url, mainUrl, tag, subtitleCallback, callback)) {
+                        multiFound = true
+                    }
+                } catch (e: Exception) {
+                    continue
+                }
+            }
+            return multiFound
+        }
         if (data.contains("driveseed.org/file")) {
             return resolveDriveSeed(data, subtitleCallback, callback)
         }
@@ -328,27 +443,9 @@ class MoviesModProvider : MainAPI() {
             // Skip junk anchors (comment-section links share the gate host).
             if (tag.contains("comment", ignoreCase = true)) continue
             try {
-                val ok = when {
-                    target.contains("cloud.unblockedgames.world") -> {
-                        val dest = bypassCloudLink(target)
-                        if (dest == null) {
-                            loadExtractor(target, data, subtitleCallback, callback)
-                        } else if (dest.contains("driveseed.org/file")) {
-                            resolveDriveSeed(dest, subtitleCallback, callback, tag)
-                        } else if (dest.contains("driveseed.org/r")) {
-                            resolveShortLink(dest, subtitleCallback, callback, tag)
-                        } else {
-                            loadExtractor(dest, data, subtitleCallback, callback)
-                        }
-                    }
-                    target.contains("driveseed.org/file") ->
-                        resolveDriveSeed(target, subtitleCallback, callback, tag)
-                    target.contains("video-seed.dev") || target.contains("video-gen.xyz") ||
-                        target.contains("googleusercontent.com") ->
-                        resolveSeedPage(target, "720p", subtitleCallback, callback, tag)
-                    else -> loadExtractor(target, data, subtitleCallback, callback)
+                if (resolveTarget(target, data, tag, subtitleCallback, callback)) {
+                    found = true
                 }
-                if (ok) found = true
             } catch (e: Exception) {
                 // try next host, these link pages die often
                 continue
