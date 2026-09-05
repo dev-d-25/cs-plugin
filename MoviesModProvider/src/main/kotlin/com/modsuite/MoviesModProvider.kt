@@ -161,6 +161,15 @@ class MoviesModProvider : MainAPI() {
         return emptyList()
     }
 
+    // The gate hosts challenge non-browser clients. Every request in the
+    // resolve chain carries desktop browser headers; without them the
+    // app gets challenge pages instead of tokens.
+    private val browserHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9"
+    )
+
     // Same middle as MoviesLeech (browser-verified): links.modpro.blog
     // archives -> cloud.unblockedgames ?sid= verification chain ->
     // driveseed.org/file/XXX -> rotating seed host (?url=<final>) ->
@@ -172,7 +181,7 @@ class MoviesModProvider : MainAPI() {
         tag: String = ""
     ): Boolean {
         return try {
-            val doc = app.get(fileUrl, referer = fileUrl).document
+            val doc = app.get(fileUrl, headers = browserHeaders, referer = fileUrl).document
             val fileName = doc.selectFirst(":containsOwn(Name :)")?.parent()?.text() ?: ""
             val quality = Regex("""(480p|720p|1080p|2160p|4k)""", RegexOption.IGNORE_CASE)
                 .find(fileName)?.value?.lowercase()?.replace("4k", "2160p") ?: "720p"
@@ -234,7 +243,7 @@ class MoviesModProvider : MainAPI() {
                     )
                     return true
                 }
-            val res = app.get(seedUrl, referer = seedUrl)
+            val res = app.get(seedUrl, headers = browserHeaders, referer = seedUrl)
             // The seed host often 302-redirects (cdn.video-gen.xyz ->
             // video-seed.dev/?url=<final>). Parse the landed URL first.
             Regex("""[?&]url=(https?://.+)$""").find(res.url)?.groupValues
@@ -286,6 +295,7 @@ class MoviesModProvider : MainAPI() {
         return try {
             val r1 = app.post(
                 "https://cloud.unblockedgames.world/",
+                headers = browserHeaders,
                 data = mapOf("_wp_http" to sid),
                 referer = sidUrl
             ).text
@@ -297,6 +307,7 @@ class MoviesModProvider : MainAPI() {
                 .find(r1)?.groupValues?.getOrNull(1) ?: return null
             val r2 = app.post(
                 action,
+                headers = browserHeaders,
                 data = mapOf("_wp_http2" to h2, "token" to token),
                 referer = "https://cloud.unblockedgames.world/"
             ).text
@@ -306,7 +317,7 @@ class MoviesModProvider : MainAPI() {
             val cval = cm.groupValues[2]
             val r3 = app.get(
                 "https://cloud.unblockedgames.world/?go=$cname",
-                headers = mapOf("Cookie" to "$cname=$cval"),
+                headers = browserHeaders + mapOf("Cookie" to "$cname=$cval"),
                 referer = action
             )
             if (r3.url.contains("driveseed.org")) return r3.url
@@ -326,7 +337,7 @@ class MoviesModProvider : MainAPI() {
         tag: String = ""
     ): Boolean {
         return try {
-            val res = app.get(shortUrl, referer = "https://cloud.unblockedgames.world/")
+            val res = app.get(shortUrl, headers = browserHeaders, referer = "https://cloud.unblockedgames.world/")
             if (res.url.contains("driveseed.org/file")) {
                 return resolveDriveSeed(res.url, subtitleCallback, callback, tag)
             }
