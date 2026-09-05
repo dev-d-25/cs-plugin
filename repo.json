@@ -3,6 +3,6 @@
   "description": "MoviesMod + MoviesLeech providers for CloudStream",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/YOUR_GITHUB_USER/cs-plugin/builds/plugins.json"
+    "https://raw.githubusercontent.com/dev-d-25/cs-plugin/builds/plugins.json"
   ]
 }
