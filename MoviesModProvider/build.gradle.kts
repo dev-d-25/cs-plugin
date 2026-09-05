@@ -9,6 +9,5 @@ cloudstream {
     status = 3
 
     tvTypes = listOf("Movie", "TvSeries")
-    lang = "hi"
     iconUrl = "https://moviesmod.zone/wp-content/uploads/2022/12/moviesmodnew-Custom.png"
 }

@@ -9,6 +9,5 @@ cloudstream {
     status = 3
 
     tvTypes = listOf("Movie", "TvSeries")
-    lang = "hi"
     iconUrl = "https://moviesleech.art/wp-content/uploads/2024/07/topmovies-logo.png"
 }
