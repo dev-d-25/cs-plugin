@@ -1,0 +1,42 @@
+[
+    {
+        "iconUrl": "https://moviesleech.art/wp-content/uploads/2024/07/topmovies-logo.png",
+        "fileHash": "sha256-b9fdf0994934538c72d0e1a5a2d262eafa7b12a2d4e9045058562c34bb5c52e8",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/dev-d-25/cs-plugin",
+        "fileSize": 62836,
+        "status": 3,
+        "authors": [
+            "you"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 11,
+        "internalName": "MoviesLeechProvider",
+        "description": "MoviesLeech provider - Bollywood, South, Hindi series",
+        "url": "https://raw.githubusercontent.com/dev-d-25/cs-plugin/builds/MoviesLeechProvider.cs3",
+        "name": "MoviesLeechProvider"
+    },
+    {
+        "iconUrl": "https://moviesmod.zone/wp-content/uploads/2022/12/moviesmodnew-Custom.png",
+        "fileHash": "sha256-11fe92900729b55420cac2acdbacf3cb3cab453687ee800292f0e6f4dd7baa3b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/dev-d-25/cs-plugin",
+        "fileSize": 62859,
+        "status": 3,
+        "authors": [
+            "you"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 7,
+        "internalName": "MoviesModProvider",
+        "description": "MoviesMod provider - movies, series, dubbed",
+        "url": "https://raw.githubusercontent.com/dev-d-25/cs-plugin/builds/MoviesModProvider.cs3",
+        "name": "MoviesModProvider"
+    }
+]
