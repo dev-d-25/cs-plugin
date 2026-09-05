@@ -311,31 +311,43 @@ class MoviesLeechProvider : MainAPI() {
         val sid = Regex("[?&]sid=([^&]+)").find(sidUrl)?.groupValues?.getOrNull(1)
             ?: return null
         return try {
+            // The shared app client keeps no cookies between calls, but the
+            // gate sets session cookies that later stages require. Carry a
+            // jar manually, exactly like a browser session would.
+            val jar = mutableMapOf<String, String>()
             val r1 = app.post(
                 "https://cloud.unblockedgames.world/",
                 headers = browserHeaders,
+                cookies = jar,
                 data = mapOf("_wp_http" to enc(sid)),
                 referer = sidUrl
-            ).text
+            )
+            jar.putAll(r1.cookies)
+            val r1text = r1.text
             val action = Regex("""id="landing"[^>]*action="([^"]+)"""")
-                .find(r1)?.groupValues?.getOrNull(1) ?: return null
+                .find(r1text)?.groupValues?.getOrNull(1) ?: return null
             val h2 = Regex("""name="_wp_http2"\s+value="([^"]+)"""")
-                .find(r1)?.groupValues?.getOrNull(1) ?: return null
+                .find(r1text)?.groupValues?.getOrNull(1) ?: return null
             val token = Regex("""name="token"\s+value="([^"]+)"""")
-                .find(r1)?.groupValues?.getOrNull(1) ?: return null
+                .find(r1text)?.groupValues?.getOrNull(1) ?: return null
             val r2 = app.post(
                 action,
                 headers = browserHeaders,
+                cookies = jar,
                 data = mapOf("_wp_http2" to enc(h2), "token" to enc(token)),
                 referer = "https://cloud.unblockedgames.world/"
-            ).text
-            val cm = Regex("""s_343\s*\(\s*'([^']+)'\s*,\s*'([^']+)'""").find(r2)
+            )
+            jar.putAll(r2.cookies)
+            val r2text = r2.text
+            val cm = Regex("""s_343\s*\(\s*'([^']+)'\s*,\s*'([^']+)'""").find(r2text)
                 ?: return null
             val cname = cm.groupValues[1]
             val cval = cm.groupValues[2]
+            jar[cname] = cval
             val r3 = app.get(
                 "https://cloud.unblockedgames.world/?go=$cname",
-                headers = browserHeaders + mapOf("Cookie" to "$cname=$cval"),
+                headers = browserHeaders,
+                cookies = jar,
                 referer = action
             )
             if (r3.url.contains("driveseed.org")) return r3.url
