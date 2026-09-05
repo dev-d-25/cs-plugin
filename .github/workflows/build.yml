@@ -50,7 +50,7 @@ jobs:
           ./gradlew make makePluginsJson
           ./gradlew ensureJarCompatibility
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds
-          cp **/build/*.jar $GITHUB_WORKSPACE/builds
+          cp **/build/*.jar $GITHUB_WORKSPACE/builds || true
           cp build/plugins.json $GITHUB_WORKSPACE/builds
           # repo.json is what CloudStream actually adds; keep it published
           # next to plugins.json on the builds branch.
