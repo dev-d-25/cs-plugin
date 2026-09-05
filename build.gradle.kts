@@ -14,8 +14,8 @@ buildscript {
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
         // Cloudstream gradle plugin which makes everything work and builds plugins
-        // NOTE: bare -SNAPSHOT no longer resolves on JitPack (empty
-        // metadata). master-SNAPSHOT tracks the same branch reliably.
+        // JitPack snapshot metadata flaps; bare -SNAPSHOT is retried
+        // because it resolved fine for earlier green builds.
         classpath("com.github.recloudstream:gradle:-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
