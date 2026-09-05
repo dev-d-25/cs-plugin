@@ -1,0 +1,8 @@
+{
+  "name": "ModSuite Repo",
+  "description": "MoviesMod + MoviesLeech providers for CloudStream",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/YOUR_GITHUB_USER/cs-plugin/builds/plugins.json"
+  ]
+}
