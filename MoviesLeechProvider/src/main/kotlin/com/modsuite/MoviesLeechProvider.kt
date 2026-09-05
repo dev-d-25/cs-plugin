@@ -290,6 +290,14 @@ class MoviesLeechProvider : MainAPI() {
         }
     }
 
+    // NOTE: NiceHttp posts data maps with addEncoded, meaning values go
+    // over the wire exactly as given. Base64 tokens contain + / and =,
+    // so they must be URL-encoded first, or + arrives as a space and the
+    // gate returns garbage. Python requests and URLSearchParams encode
+    // automatically, which is why lab tests passed while the app failed.
+    private fun enc(value: String): String =
+        java.net.URLEncoder.encode(value, "UTF-8")
+
     // Pure-HTTP bypass for the cloud.unblockedgames 3-click gate.
     // Port of the community runBypassChain (Modmovies Link Bypasser,
     // also documented in bypass-all-shortlinks and uBO discussions):
@@ -306,7 +314,7 @@ class MoviesLeechProvider : MainAPI() {
             val r1 = app.post(
                 "https://cloud.unblockedgames.world/",
                 headers = browserHeaders,
-                data = mapOf("_wp_http" to sid),
+                data = mapOf("_wp_http" to enc(sid)),
                 referer = sidUrl
             ).text
             val action = Regex("""id="landing"[^>]*action="([^"]+)"""")
@@ -318,7 +326,7 @@ class MoviesLeechProvider : MainAPI() {
             val r2 = app.post(
                 action,
                 headers = browserHeaders,
-                data = mapOf("_wp_http2" to h2, "token" to token),
+                data = mapOf("_wp_http2" to enc(h2), "token" to enc(token)),
                 referer = "https://cloud.unblockedgames.world/"
             ).text
             val cm = Regex("""s_343\s*\(\s*'([^']+)'\s*,\s*'([^']+)'""").find(r2)
