@@ -77,10 +77,10 @@ class MoviesModProvider : MainAPI() {
 
         return if (isSeries) {
             val episodes = if (rawLinks.isEmpty()) {
-                listOf(Episode(data = url, name = "Watch"))
+                listOf(newEpisode(url) { name = "Watch" })
             } else {
                 rawLinks.mapIndexed { i, (label, href) ->
-                    Episode(data = href, name = label.ifBlank { "Part ${i + 1}" })
+                    newEpisode(href) { name = label.ifBlank { "Part ${i + 1}" } }
                 }
             }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {

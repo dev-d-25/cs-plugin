@@ -102,24 +102,24 @@ class MoviesLeechProvider : MainAPI() {
             // shows Episode 1..N instead of one "G-Drive" row per quality.
             val episodes = mutableListOf<Episode>()
             if (rawLinks.isEmpty()) {
-                episodes.add(Episode(data = url, name = "Watch"))
+                episodes.add(newEpisode(url) { name = "Watch" })
             } else {
                 for ((label, href) in rawLinks) {
                     if (href.contains("leechpro.blog/archives") && !href.contains("#")) {
                         val subs = expandArchive(href)
                         if (subs.isEmpty()) {
-                            episodes.add(Episode(data = href, name = label.ifBlank { "Part" }))
+                            episodes.add(newEpisode(href) { name = label.ifBlank { "Part" } })
                         } else {
                             subs.forEach { (epLabel, epHref) ->
-                                episodes.add(Episode(data = epHref, name = "$label $epLabel".trim()))
+                                episodes.add(newEpisode(epHref) { name = "$label $epLabel".trim() })
                             }
                         }
                     } else {
-                        episodes.add(Episode(data = href, name = label.ifBlank { "Part ${episodes.size + 1}" }))
+                        episodes.add(newEpisode(href) { name = label.ifBlank { "Part ${episodes.size + 1}" } })
                     }
                 }
             }
-            if (episodes.isEmpty()) episodes.add(Episode(data = url, name = "Watch"))
+            if (episodes.isEmpty()) episodes.add(newEpisode(url) { name = "Watch" })
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.plot = plot
