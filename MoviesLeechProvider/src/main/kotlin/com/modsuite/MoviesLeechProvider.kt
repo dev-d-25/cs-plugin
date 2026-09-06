@@ -159,6 +159,9 @@ class MoviesLeechProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ) {
+        // One line per picker row: name -> final URL. This is what maps
+        // "which entries differ" questions to concrete mirrors.
+        diag("link", "${resolved.name} -> ${resolved.url}")
         callback.invoke(
             newExtractorLink(
                 name,

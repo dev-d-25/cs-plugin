@@ -40,4 +40,13 @@ class ModLinkSmokeTest {
         assertTrue(out.all { it.url.contains("googleusercontent.com") })
         assertTrue(page.calls.any { it.method == "GET" && it.url == file })
     }
+
+    @Test
+    fun `relative seed hrefs absolutize against the file page`() {
+        val html = """<html><body><a href="/zfile/abc123">Resume Cloud</a><a href="https://cdn.video-gen.xyz/x">Instant Download</a></body></html>"""
+        assertEquals(
+            listOf("https://driveseed.org/zfile/abc123", "https://cdn.video-gen.xyz/x"),
+            LinkResolver.parseSeedMirrors(html, "https://driveseed.org/file/XYZ"),
+        )
+    }
 }

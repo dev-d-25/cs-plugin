@@ -202,7 +202,7 @@ class LinkResolverTest {
         )
         val sources = listOf(
             SourceCandidate(480, "480p", "Fast Server", "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8"), SourceKind.SEED),
-            SourceCandidate(720, "720p", "Server 2", "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8"), SourceKind.SEED),
+            SourceCandidate(720, "720p", "Server 2", "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode("$finalUrl?x=2", "UTF-8"), SourceKind.SEED),
         )
         val out = resolver(page).resolveEpisode(sources)
         assertEquals(2, out.size)
@@ -217,6 +217,30 @@ class LinkResolverTest {
             mirrorName("MoviesLeech", "480p", "Instant V1 480p"),
         )
     }
+    @Test
+    fun `relative seed hrefs absolutize against the file page`() {
+        val html = """<html><body><a href="/zfile/abc123">Resume Cloud</a><a href="https://cdn.video-gen.xyz/x">Instant Download</a></body></html>"""
+        assertEquals(
+            listOf("https://driveseed.org/zfile/abc123", "https://cdn.video-gen.xyz/x"),
+            LinkResolver.parseSeedMirrors(html, "https://driveseed.org/file/XYZ"),
+        )
+    }
+
+    @Test
+    fun `identical finals emit once`() = runBlocking {
+        val page = FakePageClient()
+        val s1 = "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8")
+        val s2 = "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode("$finalUrl?other=1", "UTF-8")
+        val sources = listOf(
+            SourceCandidate(1080, "1080p", "Fast Server", s1, SourceKind.GATE),
+            SourceCandidate(1080, "1080p", "Server 2", s1, SourceKind.GATE),
+            SourceCandidate(1080, "1080p", "Server 2", s2, SourceKind.GATE),
+        )
+        val out = resolver(page).resolveEpisode(sources)
+        // First two collapse (same final), third survives.
+        assertEquals(2, out.size)
+    }
+
     @Test
     fun `seed final extraction decodes url param`() {
         val seed = "https://x.example/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8")

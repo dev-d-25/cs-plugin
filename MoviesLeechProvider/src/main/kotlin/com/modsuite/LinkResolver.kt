@@ -61,6 +61,9 @@ class LinkResolver(
                     }
                 }
             }.awaitAll().flatten()
+                // Same file reached twice (two hubs, same sid) shows up as
+                // two identical picker rows — keep the first only.
+                .distinctBy { it.url }
         }
 
     /** Resolve a single raw target (detail-page scan / legacy data path). */
@@ -103,13 +106,17 @@ class LinkResolver(
             throw ResolveError("driveseed-fetch", "HTTP ${res.status} for $fileUrl")
         }
         val quality = parseDriveSeedQuality(res.text).ifBlank { fallbackQuality.ifBlank { "720p" } }
-        val seeds = parseSeedMirrors(res.text)
+        val seeds = parseSeedMirrors(res.text, fileUrl)
         if (seeds.isEmpty()) {
             throw ResolveError("driveseed-parse", "no seed mirrors on $fileUrl")
         }
         val out = mutableListOf<ResolvedLink>()
         for (seed in seeds) {
-            val seedName = mirrorName(providerName, quality, seedServerTag(seed))
+            // Keep the hub server in the name: different hubs can serve
+            // the same seed host, and bare "· Instant V1" rows would be
+            // indistinguishable in the picker.
+            val tag = seedServerTag(seed)
+            val seedName = if (tag.isBlank()) name else "$name · $tag"
             try {
                 out += resolveSeedPage(seed, seedName, quality)
             } catch (e: ResolveError) {
@@ -251,13 +258,17 @@ class LinkResolver(
          * Download V1/V2 plus an r2.dev Cloud Download at once).
          * "Resume Cloud" links are included too: resume implies range
          * requests, which is what streaming (not just downloading) needs.
+         * Hrefs are absolutized against the file page: some anchors are
+         * root-relative (/zfile/...) and would otherwise die with
+         * "no scheme" downstream.
          * Seed tokens rotate per page load — always from this document.
          */
-        fun parseSeedMirrors(html: String): List<String> =
-            Jsoup.parse(html).select("a[href]").mapNotNull {
+        fun parseSeedMirrors(html: String, baseUrl: String = ""): List<String> =
+            Jsoup.parse(html, baseUrl).select("a[href]").mapNotNull {
                 val label = it.text()
-                val href = it.attr("href").trim()
-                if (href.isBlank()) return@mapNotNull null
+                val raw = it.attr("href").trim()
+                if (raw.isBlank()) return@mapNotNull null
+                val href = it.attr("abs:href").trim().ifBlank { raw }
                 if (label.contains("instant download", ignoreCase = true) ||
                     label.contains("resume", ignoreCase = true) ||
                     href.contains("resume", ignoreCase = true) ||
