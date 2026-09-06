@@ -58,6 +58,10 @@ subprojects {
             targetCompatibility = JavaVersion.VERSION_1_8
         }
 
+        testOptions {
+            unitTests.isReturnDefaultValues = true
+        }
+
         tasks.withType<KotlinJvmCompile> {
             compilerOptions {
                 jvmTarget.set(JvmTarget.JVM_1_8) // Required
@@ -72,9 +76,12 @@ subprojects {
 
     dependencies {
         val implementation by configurations
+        val testImplementation by configurations
 
         implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
-
+        // Unit tests for the pure parser/resolver seams (plain JVM JUnit4).
+        testImplementation("junit:junit:4.13.2")
+        testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
         // These dependencies can include any of those which are added by the app,
         // but you don't need to include any of them if you don't need them.
         // https://github.com/recloudstream/cloudstream/blob/master/app/build.gradle.kts

@@ -1,5 +1,6 @@
 package com.modsuite
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 
@@ -17,400 +18,176 @@ class MoviesLeechProvider : MainAPI() {
         "$mainUrl/web-series/" to "Web Series"
     )
 
-    private fun parseCard(el: org.jsoup.nodes.Element): SearchResponse? {
-        val a = el.selectFirst("a[href*=/download-]") ?: return null
-        val title = el.selectFirst(".title, h2, h3")?.text()?.trim() ?: return null
-        if (title.isBlank()) return null
-        val href = fixUrl(a.attr("href"))
-        val poster = el.selectFirst("img")?.let {
-            it.attr("data-src").ifBlank { it.attr("src") }
-        }
-        val type = if (title.contains("season", ignoreCase = true)) TvType.TvSeries else TvType.Movie
-        return if (type == TvType.TvSeries) {
-            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                this.posterUrl = poster
-            }
-        } else {
-            newMovieSearchResponse(title, href, TvType.Movie) {
-                this.posterUrl = poster
-            }
-        }
+    private val page: PageClient by lazy { AppPageClient() }
+    private val gate: GateBypass by lazy {
+        CloudGateBypass(page) { stage, msg -> diag(stage, msg) }
     }
+    private val resolver: LinkResolver by lazy {
+        LinkResolver(page, gate, name) { stage, msg -> diag(stage, msg) }
+    }
+
+    private fun diag(stage: String, msg: String) {
+        Log.i(TAG, "[$stage] $msg")
+    }
+
+    private fun diagErr(stage: String, msg: String, e: Throwable? = null) {
+        Log.w(TAG, "[$stage] $msg${e?.let { ": ${it.message}" } ?: ""}")
+    }
+
+    // ------------------------------------------------------------------
+    // Browse
+    // ------------------------------------------------------------------
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else request.data.trimEnd('/') + "/page/$page/"
-        val doc = app.get(url).document
-        val items = doc.select("article, div.latestPost, div.post").mapNotNull {
-            // homepage uses article cards, be lenient here
-            parseCard(it)
-        }.distinctBy { it.url }
+        val text = app.get(url).text
+        val items = MoviesLeechParser.parseCards(text, url).map { card ->
+            if (card.isSeries) {
+                newTvSeriesSearchResponse(card.title, card.url, TvType.TvSeries) {
+                    this.posterUrl = card.poster
+                }
+            } else {
+                newMovieSearchResponse(card.title, card.url, TvType.Movie) {
+                    this.posterUrl = card.poster
+                }
+            }
+        }
         return newHomePageResponse(request.name, items)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get("$mainUrl/?s=${query.trim().replace(" ", "+")}").document
-        return doc.select("article, div.latestPost").mapNotNull { parseCard(it) }
-            .distinctBy { it.url }
+        val url = "$mainUrl/?s=${query.trim().replace(" ", "+")}"
+        val text = app.get(url).text
+        return MoviesLeechParser.parseCards(text, url).map { card ->
+            if (card.isSeries) {
+                newTvSeriesSearchResponse(card.title, card.url, TvType.TvSeries) {
+                    this.posterUrl = card.poster
+                }
+            } else {
+                newMovieSearchResponse(card.title, card.url, TvType.Movie) {
+                    this.posterUrl = card.poster
+                }
+            }
+        }
     }
 
-    // Browser-verified: leechpro archive pages list Episode 1..N links
-    // pointing DIRECTLY at cloud.unblockedgames.world/?sid=... So collect
-    // by label, not by href pattern.
-    private val episodeLabel = Regex("""episode\s*\d+""", RegexOption.IGNORE_CASE)
+    // ------------------------------------------------------------------
+    // Detail (movies first, then series)
+    // ------------------------------------------------------------------
 
-    // leechpro archive pages render the episode list after a 2s JS timer.
-    // Expand them server-side so each Episode points at its own link
-    // instead of the hub page.
+    /**
+     * Archive hubs sometimes render empty (JS gate). Retry and keep the
+     * first non-empty result; an empty return is a *diagnosed* outcome,
+     * not a silent fallback into the wrong resolver.
+     */
     private suspend fun expandArchive(archiveUrl: String): List<Pair<String, String>> {
-        // Archive hubs are flaky: they sometimes render empty (JS gate).
-        // Retry and keep the first non-empty result.
-        repeat(3) {
+        repeat(3) { attempt ->
             try {
-                val doc = app.get(archiveUrl, referer = mainUrl).document
-                val out = doc.select("a[href]").mapNotNull {
-                    val href = fixUrl(it.attr("href"))
-                    val label = it.text().trim()
-                    if (label.isNotBlank() && episodeLabel.containsMatchIn(label)) {
-                        label to href
-                    } else null
-                }.distinctBy { it.second }
+                val res = page.get(archiveUrl, referer = mainUrl)
+                val out = MoviesLeechParser.parseArchive(res.text, res.url)
                 if (out.isNotEmpty()) return out
+                diag("archive", "empty episode list (attempt ${attempt + 1}/3) $archiveUrl")
             } catch (e: Exception) {
+                diagErr("archive", "fetch failed (attempt ${attempt + 1}/3) $archiveUrl", e)
             }
         }
         return emptyList()
     }
 
-    override suspend fun load(url: String): LoadResponse {        val doc = app.get(url).document
-        val title = doc.selectFirst("h1.single-title, h1")?.text()?.trim()
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: "Unknown"
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-        val plot = doc.selectFirst("div.entry-content p, div.thecontent p")?.text()?.trim()
-        val year = Regex("""\((19|20)\d{2}\)""").find(title)?.value
-            ?.removeSurrounding("(", ")")?.toIntOrNull()
+    override suspend fun load(url: String): LoadResponse {
+        val res = app.get(url)
+        val detail = MoviesLeechParser.parseDetail(res.text, res.url)
 
-        // Streaming only: zip/batch packs and promo links are useless in
-        // the app, drop them before they ever become episodes.
-        val rawLinks = doc.select("div.entry-content a[href], div.thecontent a[href]").map {
-            it.text().trim() to fixUrl(it.attr("href"))
-        }.filter { (label, href) ->
-            if (label.contains("batch", ignoreCase = true) ||
-                label.contains("zip", ignoreCase = true) ||
-                href.contains("modlist")
-            ) return@filter false
-            href.contains("archive") || href.contains("hubcloud") ||
-                href.contains("filepress") || href.contains("vcloud") ||
-                href.contains("gdflix") || href.contains("leech")
-        }
-        // Qualities appear in title order: "480p [500MB] || 720p [1.4GB]".
-        val qualities = Regex("""(480p|720p|1080p|2160p|4K)""", RegexOption.IGNORE_CASE)
-            .findAll(title).map { it.value.lowercase().replace("4k", "2160p") }.toList()
-
-        val isSeries = title.contains("season", ignoreCase = true) ||
-            title.contains("episode", ignoreCase = true)
-
-        return if (isSeries) {
-            // Per-episode entries. Each episode carries every quality as
-            // "quality|url" chunks joined by "|||", so tapping Episode 1
-            // offers 480p / 720p / 1080p mirrors like the reference apps.
-            val episodes = mutableListOf<Episode>()
-            if (rawLinks.isEmpty()) {
-                episodes.add(newEpisode(url) { name = "Watch" })
-            } else {
-                val perQuality = rawLinks.mapIndexed { qi, (_, href) ->
-                    val quality = qualities.getOrNull(qi) ?: "HD"
-                    if (href.contains("leechpro.blog/archives") && !href.contains("#")) {
-                        quality to expandArchive(href)
+        return if (detail.isSeries) {
+            val groups = detail.rawLinks.mapIndexed { index, raw ->
+                val qualityLabel = detail.qualities.getOrNull(index) ?: ""
+                val expanded =
+                    if (classifySource(raw.url) == SourceKind.ARCHIVE && !raw.url.contains("#")) {
+                        expandArchive(raw.url)
                     } else {
-                        quality to listOf("Watch" to href)
+                        listOf(raw.label to raw.url)
                     }
-                }.filter { it.second.isNotEmpty() }
-                val count = perQuality.maxOfOrNull { it.second.size } ?: 0
-                if (count == 0) {
-                    perQuality.forEach { (quality, subs) ->
-                        subs.forEach { (_, href) ->
-                            episodes.add(newEpisode(href) { name = quality })
-                        }
+                MoviesLeechParser.QualityGroup(
+                    qualityLabel = qualityLabel,
+                    server = MoviesLeechParser.serverNameFromLabel(raw.label),
+                    episodes = expanded,
+                )
+            }.filter { it.episodes.isNotEmpty() }
+
+            val plans = MoviesLeechParser.buildEpisodePlans(detail.title, groups, detail.poster)
+            diag(
+                "load-series",
+                "${detail.title}: ${plans.size} episodes from ${groups.size} quality groups",
+            )
+            val episodes = if (plans.isEmpty()) {
+                // No episodes parsed: single entry pointing at the detail
+                // page, which loadLinks() scans as a page (with logging),
+                // instead of fabricating archive URLs for the extractor.
+                diag("load-series", "no episodes parsed, detail-page fallback for $url")
+                mutableListOf(newEpisode(url) { name = "Watch" })
+            } else {
+                plans.map { plan ->
+                    newEpisode(EpisodePayload.encode(plan.sources)) {
+                        this.name = plan.name
+                        this.season = plan.season
+                        this.episode = plan.number
+                        this.posterUrl = plan.poster
                     }
-                } else {
-                    for (i in 0 until count) {
-                        val chunks = perQuality.mapNotNull { (quality, subs) ->
-                            subs.getOrNull(i)?.let { (_, href) -> "$quality|$href" }
-                        }
-                        if (chunks.isEmpty()) continue
-                        episodes.add(newEpisode(chunks.joinToString("|||")) {
-                            name = "Episode ${i + 1}"
-                        })
-                    }
-                }
+                }.toMutableList()
             }
-            if (episodes.isEmpty()) episodes.add(newEpisode(url) { name = "Watch" })
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
-                this.plot = plot
-                this.year = year
+            newTvSeriesLoadResponse(detail.title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = detail.poster
+                this.plot = detail.plot
+                this.year = detail.year
             }
         } else {
-            val data = rawLinks.firstOrNull()?.second ?: url
-            newMovieLoadResponse(title, url, TvType.Movie, data) {
-                this.posterUrl = poster
-                this.plot = plot
-                this.year = year
+            // Movies: EVERY playable link becomes a mirror (Phase 5).
+            val sources = MoviesLeechParser.buildMovieSources(detail)
+            diag("load-movie", "${detail.title}: ${sources.size} mirrors")
+            val data = EpisodePayload.encode(sources).ifBlank { url }
+            newMovieLoadResponse(detail.title, url, TvType.Movie, data) {
+                this.posterUrl = detail.poster
+                this.plot = detail.plot
+                this.year = detail.year
             }
         }
     }
 
-    // The gate hosts challenge non-browser clients. Every request in the
-    // resolve chain carries desktop browser headers; without them the
-    // app gets challenge pages instead of tokens.
-    private val browserHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9"
-    )
+    // ------------------------------------------------------------------
+    // Links
+    // ------------------------------------------------------------------
 
-    // Full chain, reproduced end to end in a real browser:
-    //   leechpro archive -> episode link (cloud.unblockedgames ?sid=) ->
-    //   landing auto-submit -> START VERIFICATION -> article page
-    //   VERIFY TO CONTINUE -> CLICK HERE TO CONTINUE -> GO TO DOWNLOAD
-    //   (?go=pepe-XXX) -> driveseed.org/file/XXX (INSTANT DOWNLOAD anchor,
-    //   href host rotates: cdn.video-gen.xyz, video-seed.dev, ...)
-    //   -> seed page ?url=<final> -> video-downloads.googleusercontent.com
-    //   (direct file, HTTP 200 video/*, valid ~3h, no pause/resume).
-    private suspend fun resolveDriveSeed(
-        fileUrl: String,
+    private suspend fun emitResolved(
+        resolved: LinkResolver.ResolvedLink,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        tag: String = ""
-    ): Boolean {
-        return try {
-            val doc = app.get(fileUrl, headers = browserHeaders, referer = fileUrl).document
-            // file name carries quality, e.g. Mirzapur.S03.E01.480p.Hindi...
-            val fileName = doc.selectFirst(":containsOwn(Name :)")?.parent()?.text() ?: ""
-            val quality = Regex("""(480p|720p|1080p|2160p|4k)""", RegexOption.IGNORE_CASE)
-                .find(fileName)?.value?.lowercase()?.replace("4k", "2160p") ?: "720p"
-            // Match by button text AND by known seed hosts: a file page can
-            // hold several mirrors at once (Instant Download V2 on
-            // instant.video-gen.xyz, V1 on cdn.video-gen.xyz, sometimes an
-            // r2.dev Cloud Download). Resolve each so every forwardable
-            // link is emitted. Seed tokens rotate per page load, so always
-            // use fresh ones from this same document.
-            val seedUrls = doc.select("a[href]").mapNotNull {
-                val label = it.text()
-                val href = fixUrl(it.attr("href"))
-                if (label.contains("instant download", ignoreCase = true) ||
-                    href.contains("video-gen.xyz") || href.contains("r2.dev")
-                ) href else null
-            }.distinct()
-            if (seedUrls.isEmpty()) {
-                return loadExtractor(fileUrl, fileUrl, subtitleCallback, callback)
+    ) {
+        callback.invoke(
+            newExtractorLink(
+                name,
+                resolved.name,
+                resolved.url
+            ) {
+                this.type = ExtractorLinkType.VIDEO
+                this.referer = resolved.referer
+                this.quality = getQualityFromName(resolved.qualityLabel)
             }
-            var found = false
-            for (seedUrl in seedUrls) {
-                try {
-                    if (resolveSeedPage(seedUrl, quality, subtitleCallback, callback, tag)) {
-                        found = true
-                    }
-                } catch (e: Exception) {
-                    continue
-                }
-            }
-            return found
-        } catch (e: Exception) {
-            false
-        }
+        )
     }
 
-    private suspend fun resolveSeedPage(
-        seedUrl: String,
-        qualityLabel: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        tag: String = ""
-    ): Boolean {
-        // Mirror tag travels into the visible link name.
-        val linkName = "$name $qualityLabel $tag".replace(Regex("""\s+"""), " ").trim()
-        return try {
-            // Seed pages carry the final file in the ?url= query param,
-            // e.g. video-seed.dev/?url=https://video-downloads.googleusercontent.com/...
-            Regex("""[?&]url=(https?[^&]+)""").find(seedUrl)?.groupValues
-                ?.getOrNull(1)?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-                ?.takeIf { it.contains("googleusercontent.com") }?.let { finalUrl ->
-                    callback.invoke(
-                        newExtractorLink(
-                            name,
-                            linkName,
-                            finalUrl
-                        ) {
-                            this.type = ExtractorLinkType.VIDEO
-                            this.referer = seedUrl
-                            this.quality = getQualityFromName(qualityLabel)
-                        }
-                    )
-                    return true
-                }
-            val res = app.get(seedUrl, headers = browserHeaders, referer = seedUrl)
-            // The seed host often 302-redirects (cdn.video-gen.xyz ->
-            // video-seed.dev/?url=<final>). Parse the landed URL first.
-            Regex("""[?&]url=(https?://.+)$""").find(res.url)?.groupValues
-                ?.getOrNull(1)?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-                ?.takeIf { it.contains("googleusercontent.com") }?.let { finalUrl ->
-                    callback.invoke(
-                        newExtractorLink(
-                            name,
-                            linkName,
-                            finalUrl
-                        ) {
-                            this.type = ExtractorLinkType.VIDEO
-                            this.referer = res.url
-                            this.quality = getQualityFromName(qualityLabel)
-                        }
-                    )
-                    return true
-                }
-            val doc = res.document
-            val finalUrl = doc.select("a[href]").map { fixUrl(it.attr("href")) }
-                .firstOrNull { it.contains("googleusercontent.com") }
-                ?: return loadExtractor(seedUrl, seedUrl, subtitleCallback, callback)
-            callback.invoke(
-                newExtractorLink(
-                    name,
-                    linkName,
-                    finalUrl
-                ) {
-                    this.type = ExtractorLinkType.VIDEO
-                    this.referer = seedUrl
-                    this.quality = getQualityFromName(qualityLabel)
-                }
-            )
-            true
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    // NOTE: NiceHttp posts data maps with addEncoded, meaning values go
-    // over the wire exactly as given. Base64 tokens contain + / and =,
-    // so they must be URL-encoded first, or + arrives as a space and the
-    // gate returns garbage. Python requests and URLSearchParams encode
-    // automatically, which is why lab tests passed while the app failed.
-    private fun enc(value: String): String =
-        java.net.URLEncoder.encode(value, "UTF-8")
-
-    // Pure-HTTP bypass for the cloud.unblockedgames 3-click gate.
-    // Port of the community runBypassChain (Modmovies Link Bypasser,
-    // also documented in bypass-all-shortlinks and uBO discussions):
-    //   POST _wp_http=<sid> -> parse landing form action + _wp_http2 +
-    //   token -> POST them -> parse s_343('cookieName','cookieValue') ->
-    //   GET ?go=<cookieName> with Cookie header -> meta refresh url= ->
-    //   driveseed link. No WebView, no clicks. Verified live 2026-09-05:
-    //   Episode sid -> ... -> https://driveseed.org/r?key=..&id=.. pattern.
-    // Tokens are SINGLE USE: never fetch ?go= twice ("Do Not Double Click").
-    private suspend fun bypassCloudLink(sidUrl: String): String? {
-        val sid = Regex("[?&]sid=([^&]+)").find(sidUrl)?.groupValues?.getOrNull(1)
-            ?: return null
-        return try {
-            // The shared app client keeps no cookies between calls, but the
-            // gate sets session cookies that later stages require. Carry a
-            // jar manually, exactly like a browser session would.
-            val jar = mutableMapOf<String, String>()
-            val r1 = app.post(
-                "https://cloud.unblockedgames.world/",
-                headers = browserHeaders,
-                cookies = jar,
-                data = mapOf("_wp_http" to enc(sid)),
-                referer = sidUrl
-            )
-            jar.putAll(r1.cookies)
-            val r1text = r1.text
-            val action = Regex("""id="landing"[^>]*action="([^"]+)"""")
-                .find(r1text)?.groupValues?.getOrNull(1) ?: return null
-            val h2 = Regex("""name="_wp_http2"\s+value="([^"]+)"""")
-                .find(r1text)?.groupValues?.getOrNull(1) ?: return null
-            val token = Regex("""name="token"\s+value="([^"]+)"""")
-                .find(r1text)?.groupValues?.getOrNull(1) ?: return null
-            val r2 = app.post(
-                action,
-                headers = browserHeaders,
-                cookies = jar,
-                data = mapOf("_wp_http2" to enc(h2), "token" to enc(token)),
-                referer = "https://cloud.unblockedgames.world/"
-            )
-            jar.putAll(r2.cookies)
-            val r2text = r2.text
-            val cm = Regex("""s_343\s*\(\s*'([^']+)'\s*,\s*'([^']+)'""").find(r2text)
-                ?: return null
-            val cname = cm.groupValues[1]
-            val cval = cm.groupValues[2]
-            jar[cname] = cval
-            val r3 = app.get(
-                "https://cloud.unblockedgames.world/?go=$cname",
-                headers = browserHeaders,
-                cookies = jar,
-                referer = action
-            )
-            if (r3.url.contains("driveseed.org")) return r3.url
-            Regex("""url=(https?://[^\s"']+)""", RegexOption.IGNORE_CASE)
-                .find(r3.text)?.groupValues?.getOrNull(1)
-                ?.replace("&amp;", "&")?.trim()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    // Short /r?key=..&id=.. links: follow once, continue on /file/.
-    private suspend fun resolveShortLink(
-        shortUrl: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        tag: String = ""
-    ): Boolean {
-        return try {
-            val res = app.get(shortUrl, headers = browserHeaders, referer = "https://cloud.unblockedgames.world/")
-            if (res.url.contains("driveseed.org/file")) {
-                return resolveDriveSeed(res.url, subtitleCallback, callback, tag)
-            }
-            val fileLink = res.document.select("a[href]").map { fixUrl(it.attr("href")) }
-                .firstOrNull { it.contains("driveseed.org/file") }
-                ?: return false
-            resolveDriveSeed(fileLink, subtitleCallback, callback, tag)
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    // One target in, one verdict out. Shared by the multi-source branch
-    // ("quality|url|||quality|url") and the normal archive scan below.
-    private suspend fun resolveTarget(
+    /** Generic-extractor fallback for hosts with no dedicated resolver. */
+    private suspend fun fallbackExtractor(
         target: String,
         referer: String,
-        tag: String,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
     ): Boolean {
         return try {
-            when {
-                target.contains("cloud.unblockedgames.world") -> {
-                    val dest = bypassCloudLink(target)
-                    if (dest == null) {
-                        loadExtractor(target, referer, subtitleCallback, callback)
-                    } else if (dest.contains("driveseed.org/file")) {
-                        resolveDriveSeed(dest, subtitleCallback, callback, tag)
-                    } else if (dest.contains("driveseed.org/r")) {
-                        resolveShortLink(dest, subtitleCallback, callback, tag)
-                    } else {
-                        loadExtractor(dest, referer, subtitleCallback, callback)
-                    }
-                }
-                target.contains("driveseed.org/file") ->
-                    resolveDriveSeed(target, subtitleCallback, callback, tag)
-                target.contains("video-seed.dev") || target.contains("video-gen.xyz") ||
-                    (target.contains("googleusercontent.com")) ->
-                    resolveSeedPage(target, "720p", subtitleCallback, callback, tag)
-                else -> loadExtractor(target, referer, subtitleCallback, callback)
-            }
+            val ok = loadExtractor(target, referer, subtitleCallback, callback)
+            diag("extractor-fallback", "target=$target ok=$ok")
+            ok
         } catch (e: Exception) {
+            diagErr("extractor-fallback", "target=$target", e)
             false
         }
     }
@@ -421,52 +198,66 @@ class MoviesLeechProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Multi-source episode data: "480p|url|||720p|url|||1080p|url".
-        // Each chunk resolves to its own mirror entry.
-        if (data.contains("|||")) {
-            var found = false
-            for (entry in data.split("|||")) {
-                val tag = entry.substringBefore("|", "").trim()
-                val url = entry.substringAfter("|", "").trim()
-                if (url.isBlank()) continue
-                try {
-                    if (resolveTarget(url, mainUrl, tag, subtitleCallback, callback)) {
-                        found = true
-                    }
-                } catch (e: Exception) {
-                    continue
-                }
+        // Structured payload (or legacy pipe data / single URL): this
+        // episode's (or movie's) mirrors only.
+        val trimmed = data.trim()
+        val looksLikePayload = trimmed.startsWith("{") ||
+            trimmed.contains("|||") ||
+            (trimmed.startsWith("http") && !trimmed.contains("moviesleech.art"))
+        if (looksLikePayload) {
+            val sources = try {
+                EpisodePayload.decode(trimmed)
+            } catch (e: Exception) {
+                diagErr("payload", "decode failed", e)
+                emptyList()
             }
-            return found
-        }
-        // Direct DriveSeed / seed links skip straight to the resolver.
-        // Seed hosts rotate (video-seed.dev, cdn.video-gen.xyz, ...) so
-        // match broadly here and let resolveSeedPage sort it out.
-        if (data.contains("driveseed.org/file")) {
-            return resolveDriveSeed(data, subtitleCallback, callback)
-        }
-        if (data.contains("video-seed.dev") || data.contains("video-gen.xyz") ||
-            (data.contains("?url=") && data.contains("googleusercontent.com"))
-        ) {
-            return resolveSeedPage(data, "720p", subtitleCallback, callback)
-        }
-        var found = false
-        val doc = try {
-            app.get(data, referer = mainUrl).document
-        } catch (e: Exception) {
+            if (sources.isEmpty()) {
+                diag("payload", "empty sources for ${trimmed.take(80)}")
+                return false
+            }
+            // Legacy stored data can be a raw archive-hub URL (pre-JSON
+            // builds). Expand it like load() does, then resolve everything
+            // the hub lists — same as the old detail scan did.
+            val effective = if (sources.size == 1 && sources[0].kind == SourceKind.ARCHIVE) {
+                val expanded = expandArchive(sources[0].url)
+                diag("payload", "legacy archive url expanded to ${expanded.size} links")
+                expanded.map { (_, href) ->
+                    SourceCandidate(0, "HD", "Server 1", href, classifySource(href))
+                }.ifEmpty { sources }
+            } else sources
+            var found = false
+            for (link in resolver.resolveEpisode(effective)) {
+                emitResolved(link, subtitleCallback, callback)
+                found = true
+            }
+            // Mirror errors are already logged per-mirror inside the
+            // resolver; only fall through when NOTHING resolved.
+            if (found) return true
+            diag("loadLinks", "no mirror resolved from ${effective.size} sources")
             return false
         }
+
+        // Detail-page scan: collect candidate targets and resolve each
+        // through the dedicated chain (gate/seed/driveseed). Hosts with no
+        // dedicated resolver go to the generic extractor as a logged
+        // last resort — never silently.
+        val docUrl = data
+        val docText = try {
+            app.get(docUrl, referer = mainUrl).text
+        } catch (e: Exception) {
+            diagErr("loadLinks", "detail fetch failed: $docUrl", e)
+            return false
+        }
+        val doc = org.jsoup.Jsoup.parse(docText, docUrl)
         val anchors = doc.select("a[href]")
-        // Server labels on archive pages (Fast Server, Server 2, OneDrive,
-        // Episode N) so every mirror is named in the final list.
         val labels = anchors.mapNotNull {
-            val href = fixUrl(it.attr("href"))
+            val href = MoviesLeechParser.resolveUrl(docUrl, it.attr("href").trim())
             val label = it.text().trim()
             if (href.contains("cloud.unblockedgames.world") && label.isNotBlank()) {
                 href to label
             } else null
         }.toMap()
-        val targets = anchors.map { fixUrl(it.attr("href")) }
+        val targets = anchors.map { MoviesLeechParser.resolveUrl(docUrl, it.attr("href").trim()) }
             .filter { href ->
                 href.contains("driveseed.org/file") || href.contains("video-seed.dev") ||
                     href.contains("video-gen.xyz") || href.contains("googleusercontent.com") ||
@@ -478,21 +269,29 @@ class MoviesLeechProvider : MainAPI() {
             .distinct()
             .ifEmpty { listOf(data) }
 
+        var found = false
         for (target in targets) {
-            // Server tag keeps mirrors distinguishable: "Fast Server",
-            // "Server 2", "OneDrive", "Episode 3", ...
             val tag = (labels[target] ?: "")
                 .replace(Regex("""[✅🚀⚡⬇️📂✔️]+"""), "").trim()
-            // Skip junk anchors (comment-section links share the gate host).
             if (tag.contains("comment", ignoreCase = true)) continue
             try {
-                if (resolveTarget(target, data, tag, subtitleCallback, callback)) {
+                for (link in resolver.resolveTarget(target, "HD", tag)) {
+                    emitResolved(link, subtitleCallback, callback)
                     found = true
                 }
+            } catch (e: LinkResolver.ResolveError) {
+                diagErr("loadLinks", "[${e.stage}] ${e.message} target=$target")
+                if (e.stage == "target") {
+                    if (fallbackExtractor(target, docUrl, subtitleCallback, callback)) found = true
+                }
             } catch (e: Exception) {
-                continue
+                diagErr("loadLinks", "target=$target", e)
             }
         }
         return found
+    }
+
+    companion object {
+        private const val TAG = "MoviesLeech"
     }
 }

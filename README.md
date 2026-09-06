@@ -27,6 +27,36 @@ https://raw.githubusercontent.com/dev-d-25/cs-plugin/builds/repo.json
 3. Push to `main`. GitHub Action builds `.cs3` + `plugins.json` to the `builds` branch.
 4. In CloudStream go to Settings > Extensions > Add Repository and paste your `repo.json` raw URL.
 
+### Deterministic local loop (MoviesLeech first — see `guide/plan.md`)
+
+The default `java` here is newer than AGP 8.7 supports, so always build
+on Java 17 with the Android SDK visible. `scripts/build.sh` pins both
+when the known local paths exist (CI sets its own JDK/SDK):
+
+```bash
+./scripts/build.sh :MoviesLeechProvider:compileDebugKotlin   # compile one module
+./scripts/build.sh :MoviesLeechProvider:testDebugUnitTest    # parser/resolver unit tests (needs network once for JUnit)
+./scripts/build.sh :MoviesLeechProvider:lintDebug            # Android lint (clean)
+./scripts/build.sh :MoviesLeechProvider:make                 # build the .cs3
+./scripts/verify-cs3.sh                                      # check every .cs3 manifest
+```
+
+Equivalent raw form (what CI does):
+
+```bash
+JAVA_HOME=/usr/lib/jvm/java-17-temurin-jdk \
+./gradlew --offline --no-daemon \
+  :MoviesLeechProvider:compileDebugKotlin \
+  :MoviesLeechProvider:make
+```
+
+Unit tests live next to the pure seams they cover
+(`MoviesLeechParser`, `EpisodePayload`, `LinkResolver`,
+`CloudGateBypass`) with fixtures under
+`MoviesLeechProvider/src/test/resources/fixtures/`. They assert
+user-visible results: named mirrors per quality/server, S01E01 episodes
+carrying only their own links, and one VIDEO link per resolved mirror.
+
 Replace `YOUR_GITHUB_USER` in `repo.json` and in root `build.gradle.kts` cloudstream block after you create the GitHub repo.
 
 ## Notes
