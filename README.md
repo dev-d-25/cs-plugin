@@ -3,6 +3,18 @@
 CloudStream extensions for MoviesMod and MoviesLeech.
 Kotlin, built with the standard CloudStream gradle plugin. Outputs `.cs3` files.
 
+## Install in CloudStream (for users)
+
+1. Update CloudStream to the latest pre-release build.
+2. Go to Settings > Extensions > Add Repository and paste this URL:
+
+```
+https://raw.githubusercontent.com/dev-d-25/cs-plugin/builds/repo.json
+```
+
+3. Open ModSuite Repo and install MoviesMod and MoviesLeech.
+4. On Home, switch the provider selector to one of them and search.
+
 ## Modules
 
 - `MoviesModProvider` - https://moviesmod.zone/
