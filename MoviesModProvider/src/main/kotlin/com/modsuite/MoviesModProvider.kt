@@ -53,7 +53,10 @@ class MoviesModProvider : MainAPI() {
                 }
             }
         }
-        return newHomePageResponse(request.name, items)
+        return newHomePageResponse(request.name, items).also {
+            // Answers "why isn't X on the home page" from logcat alone.
+            diag("home", "${request.name}: ${items.size} items <- $url")
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
