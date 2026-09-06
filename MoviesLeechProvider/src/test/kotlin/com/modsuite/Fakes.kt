@@ -5,11 +5,11 @@ import org.junit.Test
 
 /** Shared fakes for resolver/gate tests. */
 class FakePageClient(
-    var getHandler: (url: String, referer: String?, headers: Map<String, String>, cookies: Map<String, String>) -> PageResponse =
+    var getHandler: suspend (url: String, referer: String?, headers: Map<String, String>, cookies: Map<String, String>) -> PageResponse =
         { u, _, _, _ -> error("unexpected GET $u") },
-    var postHandler: (url: String, referer: String?, headers: Map<String, String>, cookies: Map<String, String>, data: Map<String, String>) -> PageResponse =
+    var postHandler: suspend (url: String, referer: String?, headers: Map<String, String>, cookies: Map<String, String>, data: Map<String, String>) -> PageResponse =
         { u, _, _, _, _ -> error("unexpected POST $u") },
-    var probeHandler: (url: String) -> ProbeResult =
+    var probeHandler: suspend (url: String) -> ProbeResult =
         { u -> ProbeResult(u, 200, "video/mp4") },
 ) : PageClient {
     data class Call(

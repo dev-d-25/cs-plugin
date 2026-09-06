@@ -58,6 +58,11 @@ class LinkResolverTest {
                         PageResponse("$u?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8"), 200, "<html></html>")
                     u == "https://example.r2.dev/cloud789/file.mkv" ->
                         PageResponse(u, 200, fixture("seed-page.html"))
+                    u == "https://resume.example.net/dl/resume123" ->
+                        PageResponse(
+                            "$u?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8"),
+                            200, "<html></html>",
+                        )
                     else -> error("unexpected GET $u")
                 }
             },
@@ -65,8 +70,8 @@ class LinkResolverTest {
         val out = resolver(page).resolveDriveSeed(
             "https://driveseed.org/file/FILE123", "MoviesLeech · 720p", "720p",
         )
-        // V2 (?url= fast path) + V1 (redirect) + r2 (anchor scan).
-        assertEquals(3, out.size)
+        // V2 (?url= fast path) + V1 (redirect) + r2 (anchor scan) + Resume.
+        assertEquals(4, out.size)
         assertTrue(out.all { it.url.contains("googleusercontent.com") })
         // Quality comes from the file name, not a hardcoded default.
         assertTrue(out.all { it.qualityLabel == "720p" })
@@ -74,6 +79,7 @@ class LinkResolverTest {
         assertTrue(names.any { it.contains("Instant V2") })
         assertTrue(names.any { it.contains("Instant V1") })
         assertTrue(names.any { it.contains("Cloud") })
+        assertTrue(names.any { it.contains("Resume") })
     }
 
     @Test
@@ -181,6 +187,36 @@ class LinkResolverTest {
 
     // -- Pure helpers ------------------------------------------------------
 
+    @Test
+    fun `mirrors resolve concurrently, not one by one`() = runBlocking {
+        val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
+        val maxSeen = java.util.concurrent.atomic.AtomicInteger(0)
+        val page = FakePageClient(
+            probeHandler = { u ->
+                val now = inFlight.incrementAndGet()
+                maxSeen.updateAndGet { m -> maxOf(m, now) }
+                kotlinx.coroutines.delay(300)
+                inFlight.decrementAndGet()
+                ProbeResult(u, 200, "video/mp4")
+            },
+        )
+        val sources = listOf(
+            SourceCandidate(480, "480p", "Fast Server", "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8"), SourceKind.SEED),
+            SourceCandidate(720, "720p", "Server 2", "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8"), SourceKind.SEED),
+        )
+        val out = resolver(page).resolveEpisode(sources)
+        assertEquals(2, out.size)
+        // Sequential resolution could never overlap the two probes.
+        assertTrue("expected concurrent probes, max in-flight=${maxSeen.get()}", maxSeen.get() >= 2)
+    }
+
+    @Test
+    fun `mirror names never repeat the quality`() {
+        assertEquals(
+            "MoviesLeech · 480p · Instant V1",
+            mirrorName("MoviesLeech", "480p", "Instant V1 480p"),
+        )
+    }
     @Test
     fun `seed final extraction decodes url param`() {
         val seed = "https://x.example/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8")

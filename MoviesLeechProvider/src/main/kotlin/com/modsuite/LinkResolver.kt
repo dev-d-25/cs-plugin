@@ -1,5 +1,8 @@
 package com.modsuite
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.Jsoup
 
 /**
@@ -36,20 +39,29 @@ class LinkResolver(
 
     // -- Entry points ----------------------------------------------------
 
-    /** Resolve every mirror of one episode/movie payload. */
-    suspend fun resolveEpisode(sources: List<SourceCandidate>): List<ResolvedLink> {
-        val out = mutableListOf<ResolvedLink>()
-        for (s in sources) {
-            try {
-                out += resolveTarget(s.url, s.qualityLabel, displayServer(s))
-            } catch (e: ResolveError) {
-                onLog(e.stage, "${e.message} (server=${s.server} url=${s.url})")
-            } catch (e: Exception) {
-                onLog("resolve", "unexpected: ${e.message} (url=${s.url})")
-            }
+    /**
+     * Resolve every mirror of one episode/movie payload, CONCURRENTLY.
+     * Each mirror walks ~6 sequential HTTP requests against slow hosts;
+     * resolving them one by one exceeds CloudStream's loadLinks timeout
+     * (observed: 480p done at +17s, 720p timed out, 1080p cancelled).
+     * Order of the returned list still follows the source order.
+     */
+    suspend fun resolveEpisode(sources: List<SourceCandidate>): List<ResolvedLink> =
+        coroutineScope {
+            sources.map { s ->
+                async {
+                    try {
+                        resolveTarget(s.url, s.qualityLabel, displayServer(s))
+                    } catch (e: ResolveError) {
+                        onLog(e.stage, "${e.message} (server=${s.server} url=${s.url})")
+                        emptyList()
+                    } catch (e: Exception) {
+                        onLog("resolve", "unexpected: ${e.message} (url=${s.url})")
+                        emptyList()
+                    }
+                }
+            }.awaitAll().flatten()
         }
-        return out
-    }
 
     /** Resolve a single raw target (detail-page scan / legacy data path). */
     suspend fun resolveTarget(target: String, qualityLabel: String, tag: String): List<ResolvedLink> {
@@ -237,6 +249,8 @@ class LinkResolver(
          * All seed mirrors on a DriveSeed file page. Matches by button
          * text AND by known seed hosts (a file page can hold Instant
          * Download V1/V2 plus an r2.dev Cloud Download at once).
+         * "Resume Cloud" links are included too: resume implies range
+         * requests, which is what streaming (not just downloading) needs.
          * Seed tokens rotate per page load — always from this document.
          */
         fun parseSeedMirrors(html: String): List<String> =
@@ -245,6 +259,8 @@ class LinkResolver(
                 val href = it.attr("href").trim()
                 if (href.isBlank()) return@mapNotNull null
                 if (label.contains("instant download", ignoreCase = true) ||
+                    label.contains("resume", ignoreCase = true) ||
+                    href.contains("resume", ignoreCase = true) ||
                     href.contains("video-gen.xyz") || href.contains("r2.dev") ||
                     href.contains("video-seed.dev")
                 ) href else null
@@ -261,6 +277,7 @@ class LinkResolver(
 
         /** Short tag for a seed URL so V1/V2/r2 mirrors stay distinct. */
         fun seedServerTag(seedUrl: String): String = when {
+            seedUrl.contains("resume", ignoreCase = true) -> "Resume"
             seedUrl.contains("instant.video-gen.xyz") -> "Instant V2"
             seedUrl.contains("cdn.video-gen.xyz") -> "Instant V1"
             seedUrl.contains("video-seed.dev") -> "Seed"

@@ -86,6 +86,7 @@ subprojects {
         // but you don't need to include any of them if you don't need them.
         // https://github.com/recloudstream/cloudstream/blob/master/app/build.gradle.kts
         implementation(kotlin("stdlib")) // Adds Standard Kotlin Features
+        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0") // Parallel mirror resolution
         implementation("com.github.Blatzar:NiceHttp:0.4.11") // HTTP Lib
         implementation("org.jsoup:jsoup:1.18.3") // HTML Parser
         // IMPORTANT: Do not bump Jackson above 2.13.1, as newer versions will

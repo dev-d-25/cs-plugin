@@ -69,10 +69,15 @@ fun qualityLabel(quality: Int): String = when (quality) {
 
 /**
  * Mirror name for the CloudStream picker (plan Phase 5 contract), e.g.
- * "MoviesLeech · 1080p · Fast Server".
+ * "MoviesLeech · 1080p · Fast Server". Quality tokens inside the server
+ * label are stripped so names never read "480p · Instant V1 480p".
  */
 fun mirrorName(providerName: String, qualityLabel: String, server: String): String {
-    val parts = listOf(providerName.trim(), qualityLabel.trim(), server.trim())
+    val cleanServer = server.replace(qualityToken, " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim { it in " -–—:|" }
+        .trim()
+    val parts = listOf(providerName.trim(), qualityLabel.trim(), cleanServer)
         .filter { it.isNotEmpty() }
     return parts.joinToString(" · ")
 }
