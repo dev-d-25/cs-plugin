@@ -101,6 +101,10 @@ object MoviesLeechParser {
         val year = yearInTitle.find(title)?.value
             ?.removeSurrounding("(", ")")?.toIntOrNull()
 
+        // Same-site links are tags/nav (1080p-movies, genre, year, ...),
+        // never download targets — download hosts always live off-site.
+        val pageOrigin = Regex("""^(https?://[^/]+)""").find(baseUrl)
+            ?.groupValues?.getOrNull(1)?.lowercase() ?: ""
         val rawLinks = doc.select("div.entry-content a[href], div.thecontent a[href]")
             .map { it.text().trim() to it.attr("href").trim() }
             .filter { (label, href) ->
@@ -111,14 +115,13 @@ object MoviesLeechParser {
                 if (junkLabel.containsMatchIn(label)) return@filter false
                 if (label.contains("comment", ignoreCase = true)) return@filter false
                 if (href.contains("modlist")) return@filter false
+                val url = resolveUrl(baseUrl, href)
+                if (pageOrigin.isNotEmpty() && url.lowercase().startsWith(pageOrigin)) {
+                    return@filter false
+                }
                 // Usable stages: archive hubs, the verification gate, the
                 // DriveSeed/seed chain, and other known file hosts.
-                href.contains("archive") || href.contains("hubcloud") ||
-                    href.contains("filepress") || href.contains("vcloud") ||
-                    href.contains("gdflix") || href.contains("leech") ||
-                    href.contains("unblockedgames") || href.contains("driveseed") ||
-                    href.contains("googleusercontent") || href.contains("video-seed") ||
-                    href.contains("video-gen")
+                isUsableHref(url)
             }
             .map { (label, href) -> RawLink(label, resolveUrl(baseUrl, href)) }
 

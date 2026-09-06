@@ -85,7 +85,10 @@ class MoviesLeechProvider : MainAPI() {
             try {
                 val res = page.get(archiveUrl, referer = mainUrl)
                 val out = MoviesLeechParser.parseArchiveLinks(res.text, res.url)
-                if (out.isNotEmpty()) return out
+                if (out.isNotEmpty()) {
+                    diag("archive", "expanded $archiveUrl -> ${out.size} links")
+                    return out
+                }
                 diag("archive", "empty episode list (attempt ${attempt + 1}/3) $archiveUrl")
             } catch (e: Exception) {
                 diagErr("archive", "fetch failed (attempt ${attempt + 1}/3) $archiveUrl", e)

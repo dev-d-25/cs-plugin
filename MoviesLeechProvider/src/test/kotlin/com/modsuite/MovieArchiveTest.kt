@@ -46,6 +46,7 @@ class MovieArchiveTest {
     fun `movie groups flatten to resolvable gate mirrors`() = runBlocking {
         // Live movie pages link ARCHIVE hubs labeled "Download Links".
         val detail = MoviesLeechParser.parseDetail(fixture("movie-detail-archives.html"), base)
+        // Same-site tag links (1080p/720p/480p-movies) are nav, not mirrors.
         assertEquals(3, detail.rawLinks.size)
         assertTrue(detail.rawLinks.all { classifySource(it.url) == SourceKind.ARCHIVE })
 

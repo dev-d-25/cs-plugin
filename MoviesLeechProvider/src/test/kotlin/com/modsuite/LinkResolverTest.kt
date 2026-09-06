@@ -77,6 +77,35 @@ class LinkResolverTest {
     }
 
     @Test
+    fun `shortlink js redirect resolves to file page`() = runBlocking {
+        val short = "https://driveseed.org/r?key=K&id=I"
+        val file = "https://driveseed.org/file/Nix6LuRyiobOMsBTHFlY"
+        val page = FakePageClient(
+            getHandler = { u, _, _, _ ->
+                when (u) {
+                    short -> PageResponse(u, 200, fixture("shortlink-js.html"))
+                    file -> PageResponse(u, 200, fixture("driveseed-file.html"))
+                    // V2 carries ?url=, V1/r2 need a fetch.
+                    "https://instant.video-gen.xyz/?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8") ->
+                        error("fast path must not fetch")
+                    "https://cdn.video-gen.xyz/dl/seed456" ->
+                        PageResponse("$u?url=" + java.net.URLEncoder.encode(finalUrl, "UTF-8"), 200, "<html></html>")
+                    "https://example.r2.dev/cloud789/file.mkv" ->
+                        PageResponse(u, 200, fixture("seed-page.html"))
+                    else -> error("unexpected GET $u")
+                }
+            },
+        )
+        // Regression: /r pages answer with a 70-byte JS redirect, no
+        // anchor — anchor-only scanning killed every shortlink mirror.
+        val out = resolver(page).resolveShortLink(short, "MoviesLeech · 480p", "480p")
+        assertTrue(out.isNotEmpty())
+        assertTrue(out.all { it.url.contains("googleusercontent.com") })
+        // Relative /file/... path resolved against the /r page URL.
+        assertTrue(page.calls.any { it.method == "GET" && it.url == file })
+    }
+
+    @Test
     fun `failing mirror does not kill the other mirrors`() = runBlocking {
         val page = FakePageClient(
             getHandler = { u, _, _, _ ->

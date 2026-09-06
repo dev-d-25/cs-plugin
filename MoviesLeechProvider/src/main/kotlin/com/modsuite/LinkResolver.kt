@@ -32,7 +32,7 @@ class LinkResolver(
     )
 
     class ResolveError(val stage: String, message: String, cause: Throwable? = null) :
-        Exception("[$stage] $message", cause)
+        Exception(message, cause)
 
     // -- Entry points ----------------------------------------------------
 
@@ -120,10 +120,19 @@ class LinkResolver(
         if (res.url.contains("driveseed.org/file")) {
             return resolveDriveSeed(res.url, name, qualityLabel)
         }
-        val fileLink = Jsoup.parse(res.text, res.url).select("a[href]")
-            .map { it.attr("abs:href").trim() }
+        val doc = Jsoup.parse(res.text, res.url)
+        doc.select("a[href]").map { it.attr("abs:href").trim() }
             .firstOrNull { it.contains("driveseed.org/file") }
-            ?: throw ResolveError("shortlink-parse", "no /file/ link at $shortUrl")
+            ?.let { return resolveDriveSeed(it, name, qualityLabel) }
+        // /r pages answer with a ~70-byte JS redirect and no anchor, e.g.
+        // <script>window.location.replace("/file/XYZ")</script>.
+        val redirect = extractJsRedirect(res.text)
+            ?: doc.selectFirst("meta[http-equiv=refresh]")?.attr("content")
+                ?.let { CloudGateBypass.extractRefreshUrl(it) }
+        val fileLink = redirect?.let { MoviesLeechParser.resolveUrl(res.url, it) } ?: ""
+        if (!fileLink.contains("driveseed.org/file")) {
+            throw ResolveError("shortlink-parse", "no /file/ link at $shortUrl")
+        }
         return resolveDriveSeed(fileLink, name, qualityLabel)
     }
 
@@ -192,6 +201,22 @@ class LinkResolver(
         s.server.ifBlank { seedServerTag(s.url).ifBlank { "Server 1" } }
 
     companion object {
+        /**
+         * JS-redirect target from pages like the /r shortlinks:
+         * window.location.replace("/file/X"), location.href = "...", etc.
+         * Pure — unit-tested with the captured 70-byte page.
+         */
+        fun extractJsRedirect(html: String): String? {
+            val patterns = listOf(
+                Regex("""window\.location\.replace\s*\(\s*['"]([^'"]+)['"]"""),
+                Regex("""window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]"""),
+                Regex("""location\.(?:replace|assign)\s*\(\s*['"]([^'"]+)['"]"""),
+                Regex("""location\.href\s*=\s*['"]([^'"]+)['"]"""),
+            )
+            return patterns.firstNotNullOfOrNull {
+                it.find(html)?.groupValues?.getOrNull(1)?.trim()
+            }?.takeIf { it.isNotBlank() }
+        }
         /**
          * Final file URL from a seed link's ?url= param (URL-decoded).
          * Pure — unit-tested with fixtures.
