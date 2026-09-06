@@ -11,8 +11,11 @@ class MoviesLeechProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
+    // Section URLs follow the official homepage pattern (mainPageOf +
+    // getMainPage): the site's homepage IS its "latest" feed (20 posts),
+    // while /latest-movies/ is a near-empty leftover page (3 posts).
     override val mainPage = mainPageOf(
-        "$mainUrl/latest-movies/" to "Latest Movies",
+        "$mainUrl/" to "Latest Movies",
         "$mainUrl/movies/hindi-movies/" to "Hindi Movies",
         "$mainUrl/movies/south-movies/" to "South Movies",
         "$mainUrl/web-series/" to "Web Series"

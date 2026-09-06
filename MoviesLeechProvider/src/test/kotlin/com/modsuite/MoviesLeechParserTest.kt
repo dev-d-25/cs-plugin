@@ -26,6 +26,21 @@ class MoviesLeechParserTest {
         assertEquals("https://moviesleech.art/posters/xyz.jpg", series.poster)
     }
 
+    @Test
+    fun `homepage cards parse in full`() {
+        // Regression: the "Latest Movies" section pointed at
+        // /latest-movies/ (3 posts) instead of the homepage feed (20).
+        // Homepage cards use h2.title > a and plain img src.
+        val cards = MoviesLeechParser.parseCards(fixture("home.html"), base)
+        assertEquals(3, cards.size)
+        assertTrue(cards[0].title.contains("Mirzapur"))
+        assertEquals(
+            "https://moviesleech.art/wp-content/uploads/2026/09/mirzapur.jpg",
+            cards[0].poster,
+        )
+        assertTrue(cards.none { it.isSeries })
+    }
+
     // -- Movie detail ---------------------------------------------------
 
     @Test
