@@ -84,7 +84,7 @@ class MoviesLeechProvider : MainAPI() {
         repeat(3) { attempt ->
             try {
                 val res = page.get(archiveUrl, referer = mainUrl)
-                val out = MoviesLeechParser.parseArchive(res.text, res.url)
+                val out = MoviesLeechParser.parseArchiveLinks(res.text, res.url)
                 if (out.isNotEmpty()) return out
                 diag("archive", "empty episode list (attempt ${attempt + 1}/3) $archiveUrl")
             } catch (e: Exception) {
@@ -98,23 +98,15 @@ class MoviesLeechProvider : MainAPI() {
         val res = app.get(url)
         val detail = MoviesLeechParser.parseDetail(res.text, res.url)
 
-        return if (detail.isSeries) {
-            val groups = detail.rawLinks.mapIndexed { index, raw ->
-                val qualityLabel = detail.qualities.getOrNull(index) ?: ""
-                val expanded =
-                    if (classifySource(raw.url) == SourceKind.ARCHIVE && !raw.url.contains("#")) {
-                        expandArchive(raw.url)
-                    } else {
-                        listOf(raw.label to raw.url)
-                    }
-                MoviesLeechParser.QualityGroup(
-                    qualityLabel = qualityLabel,
-                    server = MoviesLeechParser.serverNameFromLabel(raw.label),
-                    episodes = expanded,
-                )
-            }.filter { it.episodes.isNotEmpty() }
+        // Every raw link expanded: archive hubs become episode links
+        // (series hubs) or server mirrors (movie hubs); direct links pass
+        // through. Movies must never store a raw ARCHIVE url — no
+        // resolver stage owns it, which surfaced as "No Links Found".
+        val groups = MoviesLeechParser.buildQualityGroups(detail, ::expandArchive)
 
-            val plans = MoviesLeechParser.buildEpisodePlans(detail.title, groups, detail.poster)
+        return if (detail.isSeries) {
+            val usable = groups.filter { it.episodes.isNotEmpty() }
+            val plans = MoviesLeechParser.buildEpisodePlans(detail.title, usable, detail.poster)
             diag(
                 "load-series",
                 "${detail.title}: ${plans.size} episodes from ${groups.size} quality groups",
@@ -141,10 +133,12 @@ class MoviesLeechProvider : MainAPI() {
                 this.year = detail.year
             }
         } else {
-            // Movies: EVERY playable link becomes a mirror (Phase 5).
-            val sources = MoviesLeechParser.buildMovieSources(detail)
+            // Movies: EVERY expanded link becomes a mirror (Phase 5).
+            // Movie hubs list servers, so one hub yields Fast Server /
+            // G-Direct / OneDrive mirrors at that hub's quality.
+            val sources = MoviesLeechParser.flattenMovieSources(groups)
             diag("load-movie", "${detail.title}: ${sources.size} mirrors")
-            val data = EpisodePayload.encode(sources).ifBlank { url }
+            val data = MoviesLeechParser.moviePayloadData(url, sources)
             newMovieLoadResponse(detail.title, url, TvType.Movie, data) {
                 this.posterUrl = detail.poster
                 this.plot = detail.plot

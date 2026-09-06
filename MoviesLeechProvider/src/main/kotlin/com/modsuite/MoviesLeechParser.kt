@@ -161,6 +161,51 @@ object MoviesLeechParser {
         Regex("""episode\s*(\d+)""", RegexOption.IGNORE_CASE).find(label)
             ?.groupValues?.getOrNull(1)?.toIntOrNull()?.minus(1)
 
+    /**
+     * Server mirrors from a movie-style hub page. Movie hubs do not list
+     * episodes; they list per-server gate links ("Fast Server (G-Drive)",
+     * "G-Direct", "OneDrive", ...). Junk and nav links are excluded,
+     * duplicates collapse by URL.
+     */
+    fun parseArchiveServers(html: String, baseUrl: String): List<Pair<String, String>> {
+        // Same-site links are hub navigation (about, categories,
+        // pagespeed), not mirrors — servers always live off-site.
+        val baseHost = Regex("""^(https?://[^/]+)""").find(baseUrl)
+            ?.groupValues?.getOrNull(1)?.lowercase() ?: ""
+        return Jsoup.parse(html, baseUrl).select("a[href]").mapNotNull {
+            val label = it.text().trim()
+            val href = it.attr("href").trim()
+            if (label.isBlank() || href.isBlank()) return@mapNotNull null
+            if (junkLabel.containsMatchIn(label)) return@mapNotNull null
+            if (label.contains("comment", ignoreCase = true)) return@mapNotNull null
+            val url = resolveUrl(baseUrl, href)
+            if (baseHost.isNotEmpty() && url.lowercase().startsWith(baseHost)) return@mapNotNull null
+            if (!isUsableHref(url)) return@mapNotNull null
+            label to url
+        }.distinctBy { it.second }
+    }
+
+    private fun isUsableHref(url: String): Boolean {
+        val u = url.lowercase()
+        if (!u.startsWith("http")) return false
+        return u.contains("archive") || u.contains("hubcloud") ||
+            u.contains("filepress") || u.contains("vcloud") ||
+            u.contains("gdflix") || u.contains("leech") ||
+            u.contains("unblockedgames") || u.contains("driveseed") ||
+            u.contains("googleusercontent") || u.contains("video-seed") ||
+            u.contains("video-gen")
+    }
+
+    /**
+     * One entry point for hub expansion: episode links when the hub lists
+     * episodes (series), server links when it lists servers (movies).
+     */
+    fun parseArchiveLinks(html: String, baseUrl: String): List<Pair<String, String>> {
+        val episodes = parseArchive(html, baseUrl)
+        if (episodes.isNotEmpty()) return episodes
+        return parseArchiveServers(html, baseUrl)
+    }
+
     /** Season number from a detail title like "Show Season 2"; default 1. */
     fun seasonFromTitle(title: String): Int =
         Regex("""season\s*(\d+)""", RegexOption.IGNORE_CASE).find(title)
@@ -233,23 +278,59 @@ object MoviesLeechParser {
     }
 
     /**
-     * Movie mirrors: EVERY playable raw link becomes a candidate (plan
-     * Phase 5 — the old code kept only the first link and discarded the
-     * rest, so qualities/servers never reached the mirror picker).
+     * Expand every raw detail link into a quality group. Archive hubs go
+     * through [expand] (episode links for series hubs, server links for
+     * movie hubs); direct links pass through untouched. Pure given the
+     * expander, so tests inject a fake while the provider injects the
+     * live retrying fetch.
      */
-    fun buildMovieSources(detail: DetailResult): List<SourceCandidate> =
+    suspend fun buildQualityGroups(
+        detail: DetailResult,
+        expand: suspend (archiveUrl: String) -> List<Pair<String, String>>,
+    ): List<QualityGroup> =
         detail.rawLinks.mapIndexed { index, raw ->
-            val label = detail.qualities.getOrNull(index) ?: raw.label
-            val q = qualityFromLabel(label).takeIf { it != 0 }
-                ?: qualityFromLabel(raw.label)
-            SourceCandidate(
-                quality = q,
-                qualityLabel = if (q != 0) qualityLabel(q) else "HD",
+            val qualityLabel = detail.qualities.getOrNull(index) ?: ""
+            val expanded =
+                if (classifySource(raw.url) == SourceKind.ARCHIVE && !raw.url.contains("#")) {
+                    expand(raw.url)
+                } else {
+                    listOf(raw.label to raw.url)
+                }
+            QualityGroup(
+                qualityLabel = qualityLabel,
                 server = serverNameFromLabel(raw.label),
-                url = raw.url,
-                kind = classifySource(raw.url),
+                episodes = expanded,
             )
         }
+
+    /**
+     * Movie mirrors: flatten every expanded group link into a candidate.
+     * Archive hubs are already expanded by [buildQualityGroups], so the
+     * payload never contains a raw ARCHIVE url (no resolver stage owns
+     * those — storing them was the "No Links Found" cause for movies).
+     */
+    fun flattenMovieSources(groups: List<QualityGroup>): List<SourceCandidate> =
+        groups.flatMap { group ->
+            group.episodes.map { (epLabel, url) ->
+                val q = qualityFromLabel(group.qualityLabel)
+                val epServer = serverNameFromLabel(epLabel)
+                SourceCandidate(
+                    quality = q,
+                    qualityLabel = group.qualityLabel.ifBlank { qualityLabel(q) },
+                    server = if (epServer == "Server 1") group.server.ifBlank { epServer } else epServer,
+                    url = url,
+                    kind = classifySource(url),
+                )
+            }
+        }
+
+    /**
+     * Movie episode data: encoded mirrors, or the detail URL when
+     * expansion found nothing (loadLinks() then scans the page with
+     * logging instead of failing on an empty payload).
+     */
+    fun moviePayloadData(pageUrl: String, sources: List<SourceCandidate>): String =
+        if (sources.isEmpty()) pageUrl else EpisodePayload.encode(sources)
 
     /**
      * Server name from an anchor label, e.g. "✅ Fast Server 1080p" ->

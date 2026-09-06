@@ -1,5 +1,6 @@
 package com.modsuite
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -41,9 +42,16 @@ class MoviesLeechParserTest {
     }
 
     @Test
-    fun `movie sources retain all qualities and servers`() {
+    fun `movie sources retain all qualities and servers`() = runBlocking {
         val detail = MoviesLeechParser.parseDetail(fixture("movie-detail.html"), base)
-        val sources = MoviesLeechParser.buildMovieSources(detail)
+        var expanded = false
+        val groups = MoviesLeechParser.buildQualityGroups(detail) {
+            expanded = true
+            emptyList()
+        }
+        // Direct links skip expansion entirely.
+        assertFalse(expanded)
+        val sources = MoviesLeechParser.flattenMovieSources(groups)
         // Regression: the old code kept only rawLinks.firstOrNull().
         assertEquals(3, sources.size)
         assertEquals(listOf(480, 720, 1080), sources.map { it.quality })
