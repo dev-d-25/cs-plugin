@@ -57,6 +57,18 @@ Unit tests live next to the pure seams they cover
 user-visible results: named mirrors per quality/server, S01E01 episodes
 carrying only their own links, and one VIDEO link per resolved mirror.
 
+### Playback notes (verified on-device)
+
+- Resolved links are direct `video-downloads.googleusercontent.com`
+  files. **Download and Play-with-MPV work.** CloudStream's built-in
+  player can stall (spinner, 00:00): the file host ignores HTTP Range
+  requests, and the player seeks the MKV index (`MediaHTTPConnection:
+  readAt … ProtocolException` in logcat). That is a server limitation,
+  not a plugin bug — use download or an external player for these links.
+- `MoviesModProvider` shares the same architecture (seams copied,
+  parser/provider retargeted to `moviesmod.zone`/`links.modpro.blog`).
+  Shared files carry a "keep in sync" header.
+
 Replace `YOUR_GITHUB_USER` in `repo.json` and in root `build.gradle.kts` cloudstream block after you create the GitHub repo.
 
 ## Notes
